@@ -1,6 +1,8 @@
-node_modules
-dist
-out
-.DS_Store
-.eslintcache
-*.log*
+node_modules/
+out/
+dist/
+release/
+*.log
+.env
+.env.*
+!.env.example

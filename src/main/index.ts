@@ -1,44 +1,154 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
-import { join } from 'path'
+import { app, shell, screen, BrowserWindow, ipcMain, protocol, net, components } from 'electron'
+import { join, resolve, sep } from 'path'
+import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+import { IPC_CHANNELS } from '../shared/api'
+import type { AppVersions } from '../shared/api'
+import {
+  assertTrustedIpcSender,
+  isAllowedExternalUrl,
+  isTrustedRendererUrl,
+  isSpotifySdkUrl,
+  isAllowedMediaOrigin
+} from './security'
+import { registerSpotifyIpc } from './spotify/ipc'
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'pastel',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true
+    }
+  }
+])
+
+const rendererUrl =
+  is.dev && process.env['ELECTRON_RENDERER_URL']
+    ? process.env['ELECTRON_RENDERER_URL']
+    : 'pastel://player/index.html'
+
+let mainWindow: BrowserWindow | null = null
 
 function createWindow(): void {
+  const { width, height } = screen.getPrimaryDisplay().workAreaSize
   // Create the browser window.
-  const mainWindow = new BrowserWindow({
-    width: 900,
-    height: 670,
+  const window = new BrowserWindow({
+    width: Math.min(1040, width),
+    height: Math.min(850, height),
+    minWidth: 350,
+    minHeight: 580,
+    frame: false,
+    backgroundColor: '#f8bed0',
     show: false,
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      nodeIntegrationInWorker: false,
+      nodeIntegrationInSubFrames: false,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      webviewTag: false,
+      experimentalFeatures: false,
+      devTools: is.dev
     }
   })
 
-  mainWindow.on('ready-to-show', () => {
-    mainWindow.show()
+  mainWindow = window
+  window.on('closed', () => {
+    if (mainWindow === window) mainWindow = null
   })
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+  window.on('ready-to-show', () => {
+    window.show()
+  })
+
+  window.webContents.session.setPermissionRequestHandler(
+    (contents, permission, callback, details) => {
+      callback(
+        contents === window.webContents &&
+          permission === 'mediaKeySystem' &&
+          isAllowedMediaOrigin(details.requestingUrl, rendererUrl)
+      )
+    }
+  )
+  window.webContents.session.setPermissionCheckHandler((contents, permission, origin) => {
+    return (
+      contents === window.webContents &&
+      permission === 'mediaKeySystem' &&
+      isAllowedMediaOrigin(origin, rendererUrl)
+    )
+  })
+
+  window.webContents.on('will-navigate', (event, url) => {
+    if (!isTrustedRendererUrl(url, rendererUrl)) event.preventDefault()
+  })
+  window.webContents.on('will-frame-navigate', (event) => {
+    if (
+      event.isMainFrame
+        ? !isTrustedRendererUrl(event.url, rendererUrl)
+        : !isSpotifySdkUrl(event.url)
+    ) {
+      event.preventDefault()
+    }
+  })
+  window.webContents.on('will-redirect', (event) => {
+    if (
+      event.isMainFrame
+        ? !isTrustedRendererUrl(event.url, rendererUrl)
+        : !isSpotifySdkUrl(event.url)
+    )
+      event.preventDefault()
+  })
+  window.webContents.on('will-attach-webview', (event) => event.preventDefault())
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (isAllowedExternalUrl(url)) {
+      void shell.openExternal(url).catch((error) => {
+        console.error('Unable to open external link:', error)
+      })
+    }
     return { action: 'deny' }
   })
 
-  // HMR for renderer base on electron-vite cli.
-  // Load the remote URL for development or the local html file for production.
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
-  } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
-  }
+  // Development uses Vite; production uses a secure, local-only custom protocol.
+  void window.loadURL(rendererUrl)
 }
 
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Castlabs installs/updates Widevine before the SDK's renderer is created.
+  try {
+    await components.whenReady()
+  } catch {
+    console.error('Widevine initialization failed. Local Spotify audio will be unavailable.')
+  }
+  protocol.handle('pastel', (request) => {
+    const url = new URL(request.url)
+    if (url.hostname !== 'player') return new Response('Not found', { status: 404 })
+    let pathname: string
+    try {
+      pathname = decodeURIComponent(url.pathname)
+    } catch {
+      return new Response('Bad request', { status: 400 })
+    }
+    const root = resolve(__dirname, '../renderer')
+    const target = resolve(root, `.${pathname}`)
+    if (!target.startsWith(`${root}${sep}`)) return new Response('Forbidden', { status: 403 })
+    return net.fetch(pathToFileURL(target).href)
+  })
+  const disposeSpotify = await registerSpotifyIpc(() => mainWindow?.webContents, rendererUrl)
+  app.on('before-quit', disposeSpotify)
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
@@ -49,8 +159,36 @@ app.whenReady().then(() => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // IPC test
-  ipcMain.on('ping', () => console.log('pong'))
+  ipcMain.handle(IPC_CHANNELS.ping, (event, ...args: unknown[]) => {
+    assertTrustedIpcSender(event, mainWindow?.webContents, rendererUrl)
+    if (args.length !== 0) throw new Error('This operation takes no arguments')
+    return 'pong'
+  })
+  ipcMain.handle(IPC_CHANNELS.getVersions, (event, ...args: unknown[]): AppVersions => {
+    assertTrustedIpcSender(event, mainWindow?.webContents, rendererUrl)
+    if (args.length !== 0) throw new Error('This operation takes no arguments')
+    return {
+      electron: process.versions.electron,
+      chrome: process.versions.chrome,
+      node: process.versions.node
+    }
+  })
+
+  const windowActions = {
+    [IPC_CHANNELS.minimize]: (): void => mainWindow?.minimize(),
+    [IPC_CHANNELS.toggleMaximize]: (): void => {
+      if (mainWindow?.isMaximized()) mainWindow.unmaximize()
+      else mainWindow?.maximize()
+    },
+    [IPC_CHANNELS.close]: (): void => mainWindow?.close()
+  }
+  for (const [channel, action] of Object.entries(windowActions)) {
+    ipcMain.handle(channel, (event, ...args: unknown[]) => {
+      assertTrustedIpcSender(event, mainWindow?.webContents, rendererUrl)
+      if (args.length !== 0) throw new Error('This operation takes no arguments')
+      action()
+    })
+  }
 
   createWindow()
 

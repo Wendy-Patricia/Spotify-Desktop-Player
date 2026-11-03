@@ -1,12 +1,13 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Electron</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pastel Player</title>
     <!-- https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+      content="default-src 'self'; script-src 'self' https://sdk.scdn.co; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.scdn.co; connect-src 'self' https://*.spotify.com wss://*.spotify.com https://*.scdn.co; media-src 'self' blob: https://*.spotify.com https://*.scdn.co; object-src 'none'; frame-src https://sdk.scdn.co; base-uri 'none'; form-action 'none'"
     />
   </head>
 

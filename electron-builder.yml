@@ -1,8 +1,10 @@
 appId: com.electron.app
 productName: spotify-desktop-player
+electronDist: node_modules/electron/dist
 directories:
   buildResources: build
 files:
+  - '!.venv/**'
   - '!**/.vscode/*'
   - '!src/*'
   - '!electron.vite.config.{js,ts,mjs,cjs}'

@@ -1,4 +1,5 @@
 out
+.venv
 dist
 pnpm-lock.yaml
 LICENSE.md
